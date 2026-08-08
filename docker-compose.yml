@@ -35,6 +35,16 @@ services:
       OVERPASS_PLANET_URL: "${OVERPASS_PLANET_URL:-https://download.geofabrik.de/north-america-latest.osm.pbf}"
       OVERPASS_DIFF_URL: "${OVERPASS_DIFF_URL:-https://download.geofabrik.de/north-america-updates/}"
 
+      # The image's init_osm3s.sh bzcat's the planet, i.e. it requires bzip2 XML
+      # (.osm.bz2). Geofabrik now ships PBF only (its .osm.bz2 files were retired
+      # and 404), so the entrypoint's raw download — always saved to
+      # /db/planet.osm.bz2 regardless of real format — is actually PBF and
+      # bunzip2 rejects it. This preprocess runs after download and before init:
+      # rename to .pbf so osmium reads it by extension, transcode to real bz2 XML
+      # at the path init expects, drop the pbf. osmium ships in the image.
+      # Override to empty only if OVERPASS_PLANET_URL already points at bz2 XML.
+      OVERPASS_PLANET_PREPROCESS: "${OVERPASS_PLANET_PREPROCESS-mv /db/planet.osm.bz2 /db/planet.osm.pbf && osmium cat -o /db/planet.osm.bz2 /db/planet.osm.pbf && rm /db/planet.osm.pbf}"
+
       # On-disk block compression for the DB. gz is a good size/CPU trade; "no"
       # is faster to query but larger, "lz4" is faster to build but larger still.
       OVERPASS_COMPRESSION: "${OVERPASS_COMPRESSION:-gz}"
