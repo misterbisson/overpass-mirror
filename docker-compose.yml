@@ -67,6 +67,10 @@ services:
 
     volumes:
       - overpass-db:/db
+      # Make the /db volume root traversable by the nginx user so the interpreter
+      # CGI can reach the dispatcher socket; without this every HTTP query fails
+      # with a permission error. See the script header for the full explanation.
+      - ./initdb.d/00-db-traversable.sh:/docker-entrypoint-initdb.d/00-db-traversable.sh:ro
 
     # NOTE: the image ships its own HEALTHCHECK that probes /api/status, so the
     # container will report "unhealthy" during the hours-long initial import
