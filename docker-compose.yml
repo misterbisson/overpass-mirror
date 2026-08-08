@@ -17,7 +17,16 @@
 
 services:
   overpass:
-    image: wiktorn/overpass-api:${OVERPASS_IMAGE_TAG:-v0.7.62.9}
+    # Build the pinned upstream image + pbzip2 (see Dockerfile). The base tag is
+    # passed through as a build arg; the built image is tagged locally so compose
+    # builds it once and reuses it. Recreating the container reuses the seeded
+    # /db volume (init is skipped once /db/init_done exists), so switching to this
+    # build does not re-import an already-seeded volume.
+    build:
+      context: .
+      args:
+        OVERPASS_IMAGE_TAG: "${OVERPASS_IMAGE_TAG:-v0.7.62.9}"
+    image: overpass-mirror:${OVERPASS_IMAGE_TAG:-v0.7.62.9}
     restart: unless-stopped
     environment:
       # init = download the extract and build the DB from scratch on first run.
@@ -40,10 +49,15 @@ services:
       # and 404), so the entrypoint's raw download — always saved to
       # /db/planet.osm.bz2 regardless of real format — is actually PBF and
       # bunzip2 rejects it. This preprocess runs after download and before init:
-      # rename to .pbf so osmium reads it by extension, transcode to real bz2 XML
-      # at the path init expects, drop the pbf. osmium ships in the image.
+      # rename to .pbf, then stream osmium's XML through pbzip2 (parallel bzip2,
+      # from the Dockerfile) into the .osm.bz2 the importer expects, and drop the
+      # pbf. This is the dominant cost of a from-scratch import; pbzip2 spreads it
+      # across all cores instead of one. pbzip2 output is standard bzip2, so the
+      # importer reads it unchanged.
+      # Fallback if you run the plain upstream image (no pbzip2), swap the middle
+      # command for: osmium cat -o /db/planet.osm.bz2 /db/planet.osm.pbf
       # Override to empty only if OVERPASS_PLANET_URL already points at bz2 XML.
-      OVERPASS_PLANET_PREPROCESS: "${OVERPASS_PLANET_PREPROCESS-mv /db/planet.osm.bz2 /db/planet.osm.pbf && osmium cat -o /db/planet.osm.bz2 /db/planet.osm.pbf && rm /db/planet.osm.pbf}"
+      OVERPASS_PLANET_PREPROCESS: "${OVERPASS_PLANET_PREPROCESS-mv /db/planet.osm.bz2 /db/planet.osm.pbf && osmium cat /db/planet.osm.pbf -f osm -o - | pbzip2 -c > /db/planet.osm.bz2 && rm /db/planet.osm.pbf}"
 
       # On-disk block compression for the DB. gz is a good size/CPU trade; "no"
       # is faster to query but larger, "lz4" is faster to build but larger still.
