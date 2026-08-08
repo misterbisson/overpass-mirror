@@ -1,0 +1,130 @@
+name: CI
+
+# Hygiene + stack-fit gate for this Overpass-mirror repo. The repo is an ops
+# stack (Docker Compose seeding the wiktorn/overpass-api engine, plus shell
+# tooling and docs — see the roadmap, issue #10), not an application codebase,
+# so there is no compiler to run. Instead this does two things:
+#
+#   1. Language-agnostic hygiene true of any tree: no conflict markers, no
+#      oversized blobs, no case-insensitive filename collisions.
+#   2. Stack checks that stay dormant until the files they target land, then
+#      light up automatically: `docker compose config` once a compose file
+#      exists (#2), and shellcheck once shell scripts exist (#3, #8). Both use
+#      tools preinstalled on ubuntu-latest, so there is nothing to install or
+#      version-pin. Add hadolint/actionlint/yamllint here later if wanted.
+#
+# Everything runs inside ONE job named `ci`, which is a required status check on
+# main. That job always runs and always reports a conclusion — the property
+# branch protection depends on. Do NOT split the conditional checks into
+# separate jobs with `if:` at the job level: a required check that is filtered
+# out never reports, branch protection reads that as *pending*, and every PR
+# wedges unmergeable. Conditional *steps* inside an always-running job are the
+# safe shape.
+
+on:
+  pull_request:
+    branches: [main]
+
+# Supersede in-flight runs when a PR is repushed. Ubuntu bills at 1x so the
+# saving is small, but a stale run sitting on a PR is noise.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    # Every check below is seconds of work. The default 360-minute timeout only
+    # ever matters if something hangs; 10 is generous and caps a hung run.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so `git grep`/`git ls-files` see the whole tree, not a
+          # shallow slice.
+          fetch-depth: 0
+
+      - name: Check for leftover merge-conflict markers
+        run: |
+          # The marker patterns are split so this workflow file never matches
+          # itself. Excludes this file for the same reason.
+          if git grep -nE '^(<{7}|={7}|>{7})( |$)' -- ':!.github/workflows/ci.yml'; then
+            echo "::error::Merge-conflict markers found. Resolve them before merging."
+            exit 1
+          fi
+          echo "No merge-conflict markers found."
+
+      - name: Block large files (>5 MB)
+        run: |
+          # A mirror repo is exactly where a large blob sneaks in. Catch it in
+          # review, before it is permanent history. Raise the limit or move to
+          # Git LFS if a real artifact needs to live here.
+          limit=$((5 * 1024 * 1024))
+          fail=0
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            size=$(wc -c < "$f")
+            if [ "$size" -gt "$limit" ]; then
+              echo "::error file=$f::File is $size bytes (limit ${limit}). Use Git LFS or exclude it."
+              fail=1
+            fi
+          done < <(git ls-files)
+          exit $fail
+
+      - name: Detect case-insensitive filename collisions
+        run: |
+          # Two paths differing only in case build fine on Linux CI and then
+          # clobber each other on a contributor's macOS/Windows checkout.
+          dupes=$(git ls-files | tr 'A-Z' 'a-z' | sort | uniq -d)
+          if [ -n "$dupes" ]; then
+            echo "::error::Filenames colliding when lowercased:"
+            echo "$dupes"
+            exit 1
+          fi
+          echo "No case-insensitive filename collisions."
+
+      - name: Validate Docker Compose files (if any)
+        run: |
+          # Dormant until the compose stack lands (#2). `docker compose` v2 ships
+          # on ubuntu-latest, so no install. `config` validates schema and
+          # interpolation without starting anything; undefined env vars only warn
+          # (substituted empty), so this fails on real schema errors, not on the
+          # runtime config the stack expects at `up` time.
+          shopt -s nullglob
+          files=(compose.yml compose.yaml docker-compose.yml docker-compose.yaml)
+          found=0
+          for f in "${files[@]}"; do
+            [ -f "$f" ] || continue
+            found=1
+            echo "Validating $f"
+            docker compose -f "$f" config --quiet
+          done
+          [ "$found" -eq 1 ] || echo "No compose file yet — skipping (lands with #2)."
+
+      - name: Shellcheck (if any shell scripts)
+        run: |
+          # Dormant until shell tooling lands (#3, #8). shellcheck is preinstalled
+          # on ubuntu-latest. Matches by extension and by shebang so extensionless
+          # scripts are covered too.
+          scripts=()
+          while IFS= read -r f; do
+            [ -n "$f" ] && scripts+=("$f")
+          done < <(
+            { git ls-files '*.sh' '*.bash'
+              git ls-files | while IFS= read -r f; do
+                if [ -f "$f" ] && head -c 2 "$f" 2>/dev/null | grep -q '#!'; then
+                  head -1 "$f" | grep -qE '\b(sh|bash)\b' && printf '%s\n' "$f"
+                fi
+              done
+            } | sort -u
+          )
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "No shell scripts yet — skipping (lands with #3/#8)."
+            exit 0
+          fi
+          printf 'Linting: %s\n' "${scripts[@]}"
+          shellcheck "${scripts[@]}"
