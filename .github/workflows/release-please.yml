@@ -1,0 +1,28 @@
+name: release-please
+
+# Turns merged Conventional-Commit squash messages into releases: release-please
+# maintains a standing "release" PR that accumulates the changelog and the next
+# version bump, and cutting a release is merging that PR. Nothing here builds or
+# publishes an artifact — it manages versioning, the changelog, and GitHub
+# releases/tags. The `pr-message` check is the upstream guard that keeps the
+# messages this reads parseable.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    # 1x-billed and quick; the timeout only caps a hang, which would otherwise
+    # silently withhold the release PR.
+    timeout-minutes: 10
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

@@ -1,0 +1,47 @@
+name: PR message
+
+# Validates that this PR's squash-merge commit message parses as a Conventional
+# Commit. Merges here are squash-only, so GitHub builds the commit message from
+# the PR *title* (plus " (#N)") and the PR *description* — release-please then
+# parses that message to decide whether a release happens. That makes the PR
+# title and body load-bearing release input, which is not obvious while writing
+# one, so this check surfaces a bad message *before* merge instead of silently
+# dropping the release afterward.
+
+on:
+  pull_request:
+    branches: [main]
+    # `edited` matters as much as `opened`: the title/body is release input and
+    # is most often fixed *after* the PR already exists.
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  conventional-commit:
+    # This name is the required-status-check context on main. Keep it stable.
+    name: squash message parses
+    runs-on: ubuntu-latest
+    # Runs in ~10s on 1x-billed Ubuntu; the timeout just caps a hang, which
+    # would otherwise sit on the PR looking unresolved.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Pinned to the same parser release-please uses. A regex approximation
+      # would disagree with the real tool at exactly the margins this check
+      # exists to cover.
+      - name: Install parser
+        run: npm install --no-save --no-package-lock @conventional-commits/parser@0.4.1
+
+      - name: Check squash message
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node .github/scripts/check-pr-message.mjs

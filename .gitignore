@@ -1,0 +1,9 @@
+.DS_Store
+
+# Local secrets / real-data fixtures — never committed. No trailing slash on
+# .dev-data so the pattern still matches a symlink pointing at a main checkout.
+.dev.vars
+.dev-data
+
+# Claude Code local state (worktrees, session scratch) — not project content.
+.claude/
