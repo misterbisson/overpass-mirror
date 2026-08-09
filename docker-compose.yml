@@ -1,0 +1,96 @@
+# Overpass API mirror (issue #2). One self-contained wiktorn/overpass-api
+# container runs the whole stack: the Overpass interpreter + dispatcher, an
+# nginx/fcgiwrap front end serving /api/interpreter, and a diff-update loop that
+# keeps the DB current from OVERPASS_DIFF_URL. No external database or sidecars.
+#
+# Defaults target the whole North America extract. Every knob is overridable
+# from the environment (see .env.example) so the same file smoke-tests against a
+# tiny extract without edits, e.g.:
+#
+#   OVERPASS_PLANET_URL=https://download.geofabrik.de/north-america/us/district-of-columbia-latest.osm.pbf \
+#   OVERPASS_DIFF_URL=https://download.geofabrik.de/north-america/us/district-of-columbia-updates/ \
+#   OVERPASS_PORT=12346 docker compose -p overpass-smoke up -d
+#
+# The database lives in a named volume, not a bind mount, so the multi-GB import
+# never lands in the repo and survives `up`/`down` (use `down -v` to discard it
+# and force a fresh re-import).
+
+services:
+  overpass:
+    # Build the pinned upstream image + pbzip2 (see Dockerfile). The base tag is
+    # passed through as a build arg; the built image is tagged locally so compose
+    # builds it once and reuses it. Recreating the container reuses the seeded
+    # /db volume (init is skipped once /db/init_done exists), so switching to this
+    # build does not re-import an already-seeded volume.
+    build:
+      context: .
+      args:
+        OVERPASS_IMAGE_TAG: "${OVERPASS_IMAGE_TAG:-v0.7.62.9}"
+    image: overpass-mirror:${OVERPASS_IMAGE_TAG:-v0.7.62.9}
+    restart: unless-stopped
+    environment:
+      # init = download the extract and build the DB from scratch on first run.
+      # After the volume is seeded, the container reuses it and only applies
+      # diffs; a re-import happens only if the volume is emptied.
+      OVERPASS_MODE: "${OVERPASS_MODE:-init}"
+
+      # no = drop history/attic and per-object metadata. Much smaller and faster
+      # to import; sufficient for current-state POI/geometry queries. Switch to
+      # "attic" only if time-travel queries are ever needed (far larger DB).
+      OVERPASS_META: "${OVERPASS_META:-no}"
+
+      # Source extract and its matching diff feed. Keep these two in the same
+      # region or the DB slowly accretes out-of-region objects (see issue #3).
+      OVERPASS_PLANET_URL: "${OVERPASS_PLANET_URL:-https://download.geofabrik.de/north-america-latest.osm.pbf}"
+      OVERPASS_DIFF_URL: "${OVERPASS_DIFF_URL:-https://download.geofabrik.de/north-america-updates/}"
+
+      # The image's init_osm3s.sh bzcat's the planet, i.e. it requires bzip2 XML
+      # (.osm.bz2). Geofabrik now ships PBF only (its .osm.bz2 files were retired
+      # and 404), so the entrypoint's raw download — always saved to
+      # /db/planet.osm.bz2 regardless of real format — is actually PBF and
+      # bunzip2 rejects it. This preprocess runs after download and before init:
+      # rename to .pbf, then stream osmium's XML through pbzip2 (parallel bzip2,
+      # from the Dockerfile) into the .osm.bz2 the importer expects, and drop the
+      # pbf. This is the dominant cost of a from-scratch import; pbzip2 spreads it
+      # across all cores instead of one. pbzip2 output is standard bzip2, so the
+      # importer reads it unchanged.
+      # Fallback if you run the plain upstream image (no pbzip2), swap the middle
+      # command for: osmium cat -o /db/planet.osm.bz2 /db/planet.osm.pbf
+      # Override to empty only if OVERPASS_PLANET_URL already points at bz2 XML.
+      OVERPASS_PLANET_PREPROCESS: "${OVERPASS_PLANET_PREPROCESS-mv /db/planet.osm.bz2 /db/planet.osm.pbf && osmium cat /db/planet.osm.pbf -f osm -o - | pbzip2 -c > /db/planet.osm.bz2 && rm /db/planet.osm.pbf}"
+
+      # On-disk block compression for the DB. gz is a good size/CPU trade; "no"
+      # is faster to query but larger, "lz4" is faster to build but larger still.
+      OVERPASS_COMPRESSION: "${OVERPASS_COMPRESSION:-gz}"
+
+      # Area generation powers is_in()/area{} queries but roughly doubles import
+      # time and adds a standing background load. Off by default; turn on once we
+      # confirm the consumer's queries need areas (issue #4).
+      OVERPASS_USE_AREAS: "${OVERPASS_USE_AREAS:-false}"
+      OVERPASS_RULES_LOAD: "${OVERPASS_RULES_LOAD:-10}"
+
+      # Seconds the update loop sleeps between diff passes. 86400 = ~daily, which
+      # matches the Geofabrik daily feed and is plenty fresh for POI data. Drop
+      # to 60 only if paired with a minutely feed.
+      OVERPASS_UPDATE_SLEEP: "${OVERPASS_UPDATE_SLEEP:-86400}"
+
+    ports:
+      # Host side is high/non-privileged so this needs no root and stays out of
+      # the way of anything on 80. Container serves on 80.
+      - "${OVERPASS_PORT:-12345}:80"
+
+    volumes:
+      - overpass-db:/db
+      # Make the /db volume root traversable by the nginx user so the interpreter
+      # CGI can reach the dispatcher socket; without this every HTTP query fails
+      # with a permission error. See the script header for the full explanation.
+      - ./initdb.d/00-db-traversable.sh:/docker-entrypoint-initdb.d/00-db-traversable.sh:ro
+
+    # NOTE: the image ships its own HEALTHCHECK that probes /api/status, so the
+    # container will report "unhealthy" during the hours-long initial import
+    # (nginx is not up yet). That is expected and harmless — the restart policy
+    # only acts on exit, not on health — and it flips to "healthy" once the DB is
+    # built and serving. Track real import progress via the logs, not health.
+
+volumes:
+  overpass-db:
